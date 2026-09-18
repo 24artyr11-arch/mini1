@@ -355,6 +355,10 @@ class MarketDataRateLimitError(MarketDataError):
     pass
 
 
+class MarketClosedError(MarketDataError):
+    pass
+
+
 class TwelveDataError(MarketDataError):
     pass
 
@@ -364,6 +368,9 @@ class TwelveDataRateLimitError(TwelveDataError, MarketDataRateLimitError):
 
 
 RATE_LIMIT_MESSAGE = "The market-data request limit was reached. Please wait a minute."
+MARKET_CLOSED_MESSAGE = (
+    "Market is currently closed. Signals will be available when trading resumes."
+)
 
 
 class TwelveDataClient:
@@ -419,8 +426,18 @@ class TwelveDataClient:
         if instrument.exchange:
             params["exchange"] = instrument.exchange
 
-        payload = self._request_json("price", params)
-        value = payload.get("price")
+        endpoint = "quote" if instrument.market == Market.NASDAQ else "price"
+        payload = self._request_json(endpoint, params)
+        if instrument.market == Market.NASDAQ:
+            market_open = payload.get("is_market_open")
+            if (
+                market_open is not None
+                and str(market_open).strip().lower() in {"false", "0", "closed"}
+            ):
+                raise MarketClosedError(MARKET_CLOSED_MESSAGE)
+            value = payload.get("close") or payload.get("price")
+        else:
+            value = payload.get("price")
         try:
             price = float(value)
         except (TypeError, ValueError) as exc:
@@ -987,6 +1004,11 @@ class CapitalClient:
             raise CapitalInstrumentUnavailable(
                 f"Capital.com returned no live data for {instrument.label}."
             )
+
+        market_status = str(snapshot.get("marketStatus") or "").strip().upper()
+        if market_status and market_status != "TRADEABLE":
+            raise MarketClosedError(MARKET_CLOSED_MESSAGE)
+
         return self._market_midpoint(snapshot), epic
 
     def _history_epic(self, epic: str, label: str, count: int) -> pd.DataFrame:
@@ -1777,9 +1799,12 @@ class SignalService:
         key = f"signal:{instrument.market.value}:{instrument.id}:M15"
         ttl = seconds_until_next_m15_close(self.settings.candle_cache_grace_seconds)
 
+        # Recheck the short-lived live-price cache before serving an M15 signal.
+        # This prevents an older cached signal from being shown after the market closes.
+        live, _ = await self.current_price_with_meta(instrument)
+
         async def loader() -> Signal:
             bars, _ = await self._bars_with_meta(instrument)
-            live, _ = await self.current_price_with_meta(instrument)
             return self.strategy.analyze(instrument, live, bars)
 
         return await self.cache.get_or_load(key, ttl, loader)
