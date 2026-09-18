@@ -196,7 +196,7 @@ def create_api(
 ) -> FastAPI:
     app = FastAPI(
         title="MENTAL TRADER Backend",
-        version="3.4.0",
+        version="3.5.1",
         description="Mini App-first MENTAL TRADER backend. Customer actions live in the Mini App; Telegram chat is reserved for admin operations and notifications.",
         lifespan=lifespan,
     )
@@ -366,7 +366,7 @@ def create_api(
         return {
             "ok": True,
             "service": "mental-trader-backend",
-            "version": "3.5.0",
+            "version": "3.5.1",
             "timeframe": settings.timeframe_label,
             "miniapp_configured": bool(settings.miniapp_url),
             "cors_origin": origin or None,
@@ -465,8 +465,14 @@ def create_api(
                 detail="The market-data request limit was reached. Please wait a minute.",
             ) from exc
         except MarketDataError as exc:
+            logger.exception(
+                "Market price request failed for %s/%s",
+                market.value,
+                instrument.id,
+            )
             raise HTTPException(
-                status_code=502, detail="Market data is temporarily unavailable."
+                status_code=502,
+                detail=str(exc).strip() or "Market data is temporarily unavailable.",
             ) from exc
         return {
             "market": market.value,
@@ -505,8 +511,14 @@ def create_api(
                 detail="The market-data request limit was reached. Please wait a minute.",
             ) from exc
         except (MarketDataError, ValueError) as exc:
+            logger.exception(
+                "Signal calculation failed for %s/%s",
+                market.value,
+                instrument.id,
+            )
             raise HTTPException(
-                status_code=502, detail="Unable to calculate signal right now."
+                status_code=502,
+                detail=str(exc).strip() or "Unable to calculate signal right now.",
             ) from exc
         return _signal_payload(result, cached)
 
