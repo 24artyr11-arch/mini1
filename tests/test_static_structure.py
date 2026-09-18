@@ -90,3 +90,14 @@ def test_miniapp_menu_and_lifespan_startup():
 def test_receipt_upload_dependency_is_declared():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "python-multipart" in requirements
+
+def test_closed_markets_do_not_return_signals():
+    core = (ROOT / "app" / "core.py").read_text(encoding="utf-8")
+    api = (ROOT / "app" / "api.py").read_text(encoding="utf-8")
+    assert "class MarketClosedError" in core
+    assert 'snapshot.get("marketStatus")' in core
+    assert 'payload.get("is_market_open")' in core
+    assert "before serving an M15 signal" in core
+    assert "except MarketClosedError as exc" in api
+    assert "status_code=409" in api
+
