@@ -26,10 +26,10 @@ from .core import (
     INSTRUMENTS,
     MARKET_TITLES,
     AccessStore,
+    CapitalInstrumentUnavailable,
     Market,
     MarketDataError,
     MarketDataRateLimitError,
-    FcsInstrumentUnavailable,
     Settings,
     SharedMarketCache,
     Signal,
@@ -366,13 +366,13 @@ def create_api(
         return {
             "ok": True,
             "service": "mental-trader-backend",
-            "version": "3.4.0",
+            "version": "3.5.0",
             "timeframe": settings.timeframe_label,
             "miniapp_configured": bool(settings.miniapp_url),
             "cors_origin": origin or None,
             "providers": {
-                "forex": "FCS API",
-                "metals": "FCS API",
+                "forex": signal_service.market_data.capital.provider_label,
+                "metals": signal_service.market_data.capital.provider_label,
                 "crypto": "Twelve Data",
                 "nasdaq": "Twelve Data",
             },
@@ -457,12 +457,12 @@ def create_api(
             raise HTTPException(status_code=404, detail="Unknown instrument.")
         try:
             live, cached = await signal_service.current_price_with_meta(instrument)
-        except FcsInstrumentUnavailable as exc:
+        except CapitalInstrumentUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except MarketDataRateLimitError as exc:
             raise HTTPException(
                 status_code=429,
-                detail="Please wait a minute, the tokens have run out.",
+                detail="The market-data request limit was reached. Please wait a minute.",
             ) from exc
         except MarketDataError as exc:
             raise HTTPException(
@@ -497,12 +497,12 @@ def create_api(
             raise HTTPException(status_code=404, detail="Unknown instrument.")
         try:
             result, cached = await signal_service.calculate_with_meta(instrument)
-        except FcsInstrumentUnavailable as exc:
+        except CapitalInstrumentUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except MarketDataRateLimitError as exc:
             raise HTTPException(
                 status_code=429,
-                detail="Please wait a minute, the tokens have run out.",
+                detail="The market-data request limit was reached. Please wait a minute.",
             ) from exc
         except (MarketDataError, ValueError) as exc:
             raise HTTPException(
@@ -940,49 +940,28 @@ def create_api(
             "amount_usdt": float(payout["amount_usdt"]),
         }
 
-    @app.get("/api/admin/fcs/availability")
-    async def fcs_availability(
+    @app.get("/api/admin/capital/availability")
+    async def capital_availability(
         x_backend_key: str | None = Header(default=None, alias="X-Backend-Key"),
     ) -> dict:
         require_backend_key(x_backend_key)
-        try:
-            available = await __import__("asyncio").to_thread(
-                signal_service.market_data.fcs.symbol_availability
-            )
-        except MarketDataError as exc:
-            raise HTTPException(
-                status_code=502, detail="Unable to query FCS API instruments."
-            ) from exc
-
-        forex_symbols = available.get("forex", set())
-        commodity_symbols = available.get("commodity", set())
         wanted = [
             item
             for market in (Market.FOREX, Market.METALS)
             for item in INSTRUMENTS[market]
         ]
-
-        requested = []
-        for item in wanted:
-            if item.market == Market.FOREX:
-                direct = item.symbol in forex_symbols
-                mode = "direct" if direct else "unavailable"
-            else:
-                aliases = signal_service.market_data.fcs._metal_aliases(item)
-                direct = any(symbol in commodity_symbols for symbol in aliases)
-                derived = item.id in signal_service.market_data.fcs.DERIVED_METALS
-                mode = "direct" if direct else ("derived" if derived else "unavailable")
-            requested.append({
-                "market": item.market.value,
-                "id": item.id,
-                "label": item.label,
-                "symbol": item.symbol,
-                "available": mode != "unavailable",
-                "mode": mode,
-            })
+        try:
+            requested = await asyncio.to_thread(
+                signal_service.market_data.capital.instrument_availability,
+                wanted,
+            )
+        except MarketDataError as exc:
+            raise HTTPException(
+                status_code=502, detail="Unable to query Capital.com instruments."
+            ) from exc
 
         return {
-            "provider": "FCS API",
+            "provider": signal_service.market_data.capital.provider_label,
             "requested": requested,
         }
 
@@ -994,7 +973,7 @@ def create_api(
         return {
             **cache.stats(),
             "twelve_data_price_ttl_seconds": settings.price_cache_seconds,
-            "fcs_price_ttl_seconds": settings.fcs_price_cache_seconds,
+            "capital_price_ttl_seconds": settings.capital_price_cache_seconds,
             "m15_strategy": "candles and signals expire at the next M15 close + grace period",
         }
 

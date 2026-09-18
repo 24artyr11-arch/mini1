@@ -29,7 +29,7 @@ def test_four_markets_are_present():
 
 def test_provider_routing_and_cache_present():
     text = (ROOT / "app" / "core.py").read_text(encoding="utf-8")
-    assert "class FcsClient" in text
+    assert "class CapitalClient" in text
     assert "class TwelveDataClient" in text
     assert "class SharedMarketCache" in text
     assert "Market.FOREX, Market.METALS" in text
@@ -50,7 +50,7 @@ def test_miniapp_auth_and_endpoints_present():
         '/api/payment/intent',
         '/api/payment/receipt',
         '/api/payment/status',
-        '/api/admin/fcs/availability',
+        '/api/admin/capital/availability',
         '/api/admin/cache',
     ]:
         assert endpoint in api

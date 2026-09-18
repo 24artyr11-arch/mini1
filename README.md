@@ -1,4 +1,4 @@
-# MENTAL TRADER backend v3.2
+# MENTAL TRADER backend v3.5
 
 FastAPI + aiogram backend for the MENTAL TRADER Telegram Mini App.
 
@@ -40,16 +40,18 @@ MINIAPP_ORIGIN=https://mini-app.24artyr11.workers.dev
 MINIAPP_AUTH_MAX_AGE_SECONDS=86400
 BACKEND_API_KEY=long-random-server-secret
 
-FCS_API_KEY=...
-FCS_BASE_URL=https://api-v4.fcsapi.com
+CAPITAL_IDENTIFIER=your_capital_login
+CAPITAL_API_KEY=your_generated_api_key
+CAPITAL_API_PASSWORD=your_api_key_custom_password
+CAPITAL_BASE_URL=https://demo-api-capital.backend-capital.com
 TWELVE_DATA_API_KEY=...
 
 API_HOST=0.0.0.0
 API_PORT=3000
-DATABASE_PATH=bot.db
+DATABASE_PATH=/app/data/bot.db
 
 PRICE_CACHE_SECONDS=15
-FCS_PRICE_CACHE_SECONDS=60
+CAPITAL_PRICE_CACHE_SECONDS=60
 CANDLE_CACHE_GRACE_SECONDS=4
 TARGET_SIGNAL_RATE=0.70
 ADAPTIVE_LOOKBACK=96
@@ -84,7 +86,23 @@ Test after deployment:
 https://YOUR-BACKEND-DOMAIN/health
 ```
 
-Expected `version` is `3.2.0`.
+Expected `version` is `3.5.0`.
+
+## Market data providers
+
+Forex and Metals use Capital.com. Crypto and Nasdaq continue to use Twelve Data.
+The Capital.com adapter creates an API session, resolves provider epics, reads
+live bid/offer quotes and downloads `MINUTE_15` history. Bid/ask candle values
+are converted to midpoint OHLC before the existing signal strategy runs.
+
+The adapter contains no position or order methods. The API key is used only for
+session authentication and read-only market-data requests. Capital.com does not
+offer read-only API keys, so keep all credentials only in server environment
+variables and start with the Demo base URL shown above.
+
+For a live Capital.com account, set
+`CAPITAL_BASE_URL=https://api-capital.backend-capital.com`. This changes the
+account used for authentication; the bot still performs only read operations.
 
 ## Mini App payment API
 

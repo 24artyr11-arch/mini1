@@ -43,8 +43,10 @@ class Settings:
     twelve_data_api_key: str
     twelve_data_base_url: str = "https://api.twelvedata.com"
 
-    fcs_api_key: str = ""
-    fcs_base_url: str = "https://api-v4.fcsapi.com"
+    capital_identifier: str = ""
+    capital_api_key: str = ""
+    capital_api_password: str = ""
+    capital_base_url: str = "https://demo-api-capital.backend-capital.com"
 
     api_host: str = "0.0.0.0"
     api_port: int = 3000
@@ -53,7 +55,7 @@ class Settings:
     miniapp_origin: str = ""
     miniapp_auth_max_age_seconds: int = 86400
     price_cache_seconds: int = 15
-    fcs_price_cache_seconds: int = 60
+    capital_price_cache_seconds: int = 60
     candle_cache_grace_seconds: int = 4
 
     timeframe: str = "15min"
@@ -134,10 +136,21 @@ def get_settings() -> Settings:
     if not api_key:
         raise RuntimeError("Twelve Data API key is missing. Set TWELVE_DATA_API_KEY.")
 
-    fcs_api_key = (os.getenv("FCS_API_KEY") or os.getenv("FCS_ACCESS_KEY") or "").strip()
-    if not fcs_api_key:
+    capital_identifier = (os.getenv("CAPITAL_IDENTIFIER") or "").strip()
+    capital_api_key = (os.getenv("CAPITAL_API_KEY") or "").strip()
+    capital_api_password = (os.getenv("CAPITAL_API_PASSWORD") or "").strip()
+    missing_capital = [
+        name
+        for name, value in (
+            ("CAPITAL_IDENTIFIER", capital_identifier),
+            ("CAPITAL_API_KEY", capital_api_key),
+            ("CAPITAL_API_PASSWORD", capital_api_password),
+        )
+        if not value
+    ]
+    if missing_capital:
         raise RuntimeError(
-            "FCS API key is missing. Set FCS_API_KEY."
+            "Capital.com credentials are missing. Set " + ", ".join(missing_capital) + "."
         )
 
     return Settings(
@@ -146,9 +159,11 @@ def get_settings() -> Settings:
         twelve_data_base_url=os.getenv(
             "TWELVE_DATA_BASE_URL", "https://api.twelvedata.com"
         ).rstrip("/"),
-        fcs_api_key=fcs_api_key,
-        fcs_base_url=os.getenv(
-            "FCS_BASE_URL", "https://api-v4.fcsapi.com"
+        capital_identifier=capital_identifier,
+        capital_api_key=capital_api_key,
+        capital_api_password=capital_api_password,
+        capital_base_url=os.getenv(
+            "CAPITAL_BASE_URL", "https://demo-api-capital.backend-capital.com"
         ).rstrip("/"),
         api_host=os.getenv("API_HOST", "0.0.0.0"),
         api_port=int(os.getenv("PORT", os.getenv("API_PORT", "3000"))),
@@ -157,7 +172,7 @@ def get_settings() -> Settings:
         miniapp_origin=(os.getenv("MINIAPP_ORIGIN") or "").strip().rstrip("/"),
         miniapp_auth_max_age_seconds=int(os.getenv("MINIAPP_AUTH_MAX_AGE_SECONDS", "86400")),
         price_cache_seconds=int(os.getenv("PRICE_CACHE_SECONDS", "15")),
-        fcs_price_cache_seconds=int(os.getenv("FCS_PRICE_CACHE_SECONDS", "60")),
+        capital_price_cache_seconds=int(os.getenv("CAPITAL_PRICE_CACHE_SECONDS", "60")),
         candle_cache_grace_seconds=int(os.getenv("CANDLE_CACHE_GRACE_SECONDS", "4")),
         bars_count=int(os.getenv("BARS_COUNT", "350")),
         request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15")),
@@ -348,7 +363,7 @@ class TwelveDataRateLimitError(TwelveDataError, MarketDataRateLimitError):
     pass
 
 
-RATE_LIMIT_MESSAGE = "Please wait a minute, the tokens have run out."
+RATE_LIMIT_MESSAGE = "The market-data request limit was reached. Please wait a minute."
 
 
 class TwelveDataClient:
@@ -551,39 +566,57 @@ def swing_levels(
 
 
 # -----------------------------------------------------------------------------
-# FCS API connector and shared provider errors
+# Capital.com connector and shared provider errors
 # -----------------------------------------------------------------------------
 
-class FcsError(MarketDataError):
+class CapitalError(MarketDataError):
     pass
 
 
-class FcsRateLimitError(FcsError, MarketDataRateLimitError):
+class CapitalRateLimitError(CapitalError, MarketDataRateLimitError):
     pass
 
 
-class FcsInstrumentUnavailable(FcsError):
+class CapitalInstrumentUnavailable(CapitalError):
     pass
 
 
-class FcsClient:
-    """FCS API adapter for Forex and Metals.
+@dataclass(frozen=True, slots=True)
+class CapitalSessionTokens:
+    cst: str
+    security_token: str
 
-    The rest of the application receives one normalized OHLC format regardless
-    of provider. Direct FCS symbols are preferred. For several metal crosses,
-    the adapter can derive the cross from a USD metal quote and a Forex leg when
-    the direct commodity symbol is not available.
+
+class _CapitalHttpError(RuntimeError):
+    def __init__(self, status: int, error_code: str = ""):
+        self.status = status
+        self.error_code = error_code
+        label = error_code or "unknown error"
+        super().__init__(f"Capital.com HTTP {status}: {label}")
+
+
+class CapitalClient:
+    """Read-only Capital.com market-data adapter for Forex and Metals.
+
+    Only session and market-data endpoints are implemented. The client has no
+    order or position methods. Bid/ask values are normalized to midpoint OHLC
+    data so the existing signal strategy remains provider-independent.
     """
 
-    METAL_ALIASES: dict[str, tuple[str, ...]] = {
-        "xauusd": ("XAUUSD", "GOLD"),
-        "xagusd": ("XAGUSD", "SILVER"),
-        "xptusd": ("XPTUSD", "PLATINUM"),
-        "xpdusd": ("XPDUSD", "PALLADIUM"),
+    METAL_EPICS: dict[str, tuple[str, ...]] = {
+        "xauusd": ("GOLD", "XAUUSD"),
+        "xagusd": ("SILVER", "XAGUSD"),
+        "xptusd": ("PLATINUM", "XPTUSD"),
+        "xpdusd": ("PALLADIUM", "XPDUSD"),
+    }
+    METAL_SEARCH_TERMS: dict[str, str] = {
+        "xauusd": "Gold",
+        "xagusd": "Silver",
+        "xptusd": "Platinum",
+        "xpdusd": "Palladium",
     }
 
-    # Direct symbols are attempted first. If FCS does not expose the direct
-    # cross, derive it from synchronized M15 candles.
+    # If Capital.com has no direct cross, build it from synchronized M15 data.
     DERIVED_METALS: dict[str, tuple[str, str, str]] = {
         "xaueur": ("xauusd", "EURUSD", "divide"),
         "xaugbp": ("xauusd", "GBPUSD", "divide"),
@@ -595,130 +628,397 @@ class FcsClient:
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.base_url = settings.fcs_base_url.rstrip("/")
+        self.base_url = settings.capital_base_url.rstrip("/")
+        parsed_base_url = urllib.parse.urlsplit(self.base_url)
+        allowed_hosts = {
+            "api-capital.backend-capital.com",
+            "demo-api-capital.backend-capital.com",
+        }
+        if parsed_base_url.scheme != "https" or parsed_base_url.hostname not in allowed_hosts:
+            raise CapitalError(
+                "CAPITAL_BASE_URL must be an official HTTPS Capital.com API URL."
+            )
+        self.provider_label = (
+            "Capital.com Demo" if "demo-api-capital" in self.base_url.lower() else "Capital.com"
+        )
+        self._session: CapitalSessionTokens | None = None
+        self._session_last_used = 0.0
+        self._last_login_attempt = 0.0
+        self._session_lock = threading.RLock()
+        self._rate_lock = threading.Lock()
+        self._last_request_at = 0.0
+        self._epic_lock = threading.Lock()
+        self._epic_cache: dict[str, str] = {}
 
-    def _request_json(self, endpoint: str, params: dict[str, object]) -> dict:
-        query = {k: v for k, v in params.items() if v is not None}
-        query["access_key"] = self.settings.fcs_api_key
-        url = f"{self.base_url}/{endpoint.lstrip('/')}?{urllib.parse.urlencode(query)}"
+    @staticmethod
+    def _error_code(raw: str) -> str:
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("errorCode") or payload.get("message") or "")[:160]
+
+    def _throttle(self) -> None:
+        # Capital.com documents a maximum of 10 REST requests per second.
+        with self._rate_lock:
+            now = time.monotonic()
+            wait = 0.11 - (now - self._last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_at = time.monotonic()
+
+    def _http_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, object] | None = None,
+        payload: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        url = f"{self.base_url}{path}"
+        if query:
+            clean_query = {key: value for key, value in query.items() if value is not None}
+            url += "?" + urllib.parse.urlencode(clean_query)
+
+        request_headers = {
+            "Accept": "application/json",
+            "User-Agent": "mental-trader-bot/3.5",
+            **(headers or {}),
+        }
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+
+        self._throttle()
         request = urllib.request.Request(
             url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "mental-trader-bot/2.1",
-            },
+            data=body,
+            headers=request_headers,
+            method=method.upper(),
         )
         try:
             with urllib.request.urlopen(
                 request, timeout=self.settings.request_timeout_seconds
             ) as response:
-                raw = response.read().decode("utf-8")
+                raw = response.read().decode("utf-8", errors="replace")
+                response_headers = {
+                    key.lower(): value for key, value in response.headers.items()
+                }
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 429:
-                raise FcsRateLimitError(RATE_LIMIT_MESSAGE) from exc
-            if exc.code in {401, 403}:
-                raise FcsError("FCS API authentication failed. Check FCS_API_KEY and plan access.") from exc
-            if exc.code in {400, 404}:
-                raise FcsInstrumentUnavailable("FCS API did not return this instrument.") from exc
-            raise FcsError(f"FCS API HTTP {exc.code}: {body[:220]}") from exc
+            raw = exc.read().decode("utf-8", errors="replace")
+            raise _CapitalHttpError(exc.code, self._error_code(raw)) from exc
         except urllib.error.URLError as exc:
-            raise FcsError(f"Could not reach FCS API: {exc.reason}") from exc
+            raise CapitalError(f"Could not reach Capital.com: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise FcsError("FCS API request timed out.") from exc
+            raise CapitalError("Capital.com request timed out.") from exc
 
+        if not raw.strip():
+            return {}, response_headers
         try:
-            payload = json.loads(raw)
+            result = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise FcsError("FCS API returned invalid JSON.") from exc
-        if not isinstance(payload, dict):
-            raise FcsError("Unexpected FCS API response format.")
+            raise CapitalError("Capital.com returned invalid JSON.") from exc
+        if not isinstance(result, dict):
+            raise CapitalError("Unexpected Capital.com response format.")
+        error_code = str(result.get("errorCode") or "")
+        if error_code:
+            raise _CapitalHttpError(400, error_code[:160])
+        return result, response_headers
 
-        status = payload.get("status")
-        code = payload.get("code")
-        if status is False or (code not in {None, 200, "200"} and not payload.get("response")):
-            message = str(payload.get("msg") or payload.get("message") or "Unknown FCS API error")
-            if str(code) == "429" or "limit" in message.lower() or "credit" in message.lower():
-                raise FcsRateLimitError(RATE_LIMIT_MESSAGE)
-            if str(code) in {"401", "403"}:
-                raise FcsError(f"FCS API authentication/plan error: {message}")
-            raise FcsInstrumentUnavailable(message)
-        return payload
-
-    @staticmethod
-    def _response_items(payload: dict) -> list[dict]:
-        response = payload.get("response")
-        if isinstance(response, list):
-            return [item for item in response if isinstance(item, dict)]
-        if isinstance(response, dict):
-            # History is documented both as a timestamp-keyed object and as a
-            # list depending on endpoint/format. Normalize both variants.
-            if any(key in response for key in ("o", "h", "l", "c", "active")):
-                return [response]
-            return [item for item in response.values() if isinstance(item, dict)]
-        return []
-
-    @staticmethod
-    def _active_price(item: dict) -> float:
-        active = item.get("active") if isinstance(item.get("active"), dict) else item
+    def _login_locked(self) -> None:
+        # POST /session has a separate limit of one request per second.
+        since_last_login = time.monotonic() - self._last_login_attempt
+        if self._last_login_attempt and since_last_login < 1.05:
+            time.sleep(1.05 - since_last_login)
+        self._last_login_attempt = time.monotonic()
         try:
-            ask = active.get("a")
-            bid = active.get("b")
-            if ask is not None and bid is not None:
-                price = (float(ask) + float(bid)) / 2.0
-            else:
-                price = float(active["c"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise FcsError("FCS API returned an unusable live price.") from exc
-        if price <= 0:
-            raise FcsError("FCS API returned a non-positive live price.")
-        return price
+            _, headers = self._http_json(
+                "POST",
+                "/api/v1/session",
+                payload={
+                    "identifier": self.settings.capital_identifier,
+                    "password": self.settings.capital_api_password,
+                    "encryptedPassword": False,
+                },
+                headers={"X-CAP-API-KEY": self.settings.capital_api_key},
+            )
+        except _CapitalHttpError as exc:
+            if exc.status == 429:
+                raise CapitalRateLimitError(RATE_LIMIT_MESSAGE) from exc
+            raise CapitalError(
+                "Capital.com authentication failed. Check CAPITAL_IDENTIFIER, "
+                "CAPITAL_API_KEY and CAPITAL_API_PASSWORD."
+            ) from exc
 
-    def _latest_direct(self, symbol: str, *, commodity: bool) -> float:
-        params: dict[str, object] = {
-            "symbol": symbol,
-            "period": "15m",
-            "type": "commodity" if commodity else "forex",
-        }
-        payload = self._request_json("forex/latest", params)
-        items = self._response_items(payload)
-        if not items:
-            raise FcsInstrumentUnavailable(f"FCS API returned no live data for {symbol}.")
-        return self._active_price(items[0])
+        cst = (headers.get("cst") or "").strip()
+        security_token = (headers.get("x-security-token") or "").strip()
+        if not cst or not security_token:
+            raise CapitalError(
+                "Capital.com created a session without the required authentication tokens."
+            )
+        self._session = CapitalSessionTokens(cst=cst, security_token=security_token)
+        self._session_last_used = time.monotonic()
 
-    def _history_direct(self, symbol: str, count: int, *, commodity: bool) -> pd.DataFrame:
-        params: dict[str, object] = {
-            "symbol": symbol,
-            "period": "15m",
-            "length": min(max(count + 2, 222), 10000),
-            "is_chart": 0,
-        }
-        params["type"] = "commodity" if commodity else "forex"
-        payload = self._request_json("forex/history", params)
-        items = self._response_items(payload)
-        rows: list[dict[str, object]] = []
-        for item in items:
+    def _session_for_request(self) -> CapitalSessionTokens:
+        with self._session_lock:
+            idle = time.monotonic() - self._session_last_used
+            if self._session is None or idle >= 540:
+                self._login_locked()
+            assert self._session is not None
+            return self._session
+
+    def _invalidate_session(self, used: CapitalSessionTokens) -> None:
+        with self._session_lock:
+            if self._session == used:
+                self._session = None
+                self._session_last_used = 0.0
+
+    def _touch_session(self, used: CapitalSessionTokens) -> None:
+        with self._session_lock:
+            if self._session == used:
+                self._session_last_used = time.monotonic()
+
+    @staticmethod
+    def _is_session_error(exc: _CapitalHttpError) -> bool:
+        code = exc.error_code.lower()
+        return exc.status in {401, 403} or (
+            "security" in code and ("token" in code or "session" in code)
+        )
+
+    @staticmethod
+    def _raise_provider_error(exc: _CapitalHttpError) -> None:
+        code = exc.error_code.lower()
+        if exc.status == 429 or "rate" in code or "too-many" in code:
+            raise CapitalRateLimitError(RATE_LIMIT_MESSAGE) from exc
+        if exc.status == 404 or "epic" in code or "market-not-found" in code:
+            raise CapitalInstrumentUnavailable(
+                "Capital.com did not return this instrument."
+            ) from exc
+        detail = exc.error_code or f"HTTP {exc.status}"
+        raise CapitalError(f"Capital.com market-data request failed: {detail}.") from exc
+
+    def _request_json(
+        self,
+        path: str,
+        query: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        for attempt in range(2):
+            session = self._session_for_request()
             try:
-                timestamp = item.get("t")
-                if timestamp is not None:
-                    dt = pd.to_datetime(float(timestamp), unit="s", utc=True)
-                else:
-                    dt = pd.to_datetime(item["tm"], utc=True)
-                rows.append({
-                    "time": dt,
-                    "open": float(item["o"]),
-                    "high": float(item["h"]),
-                    "low": float(item["l"]),
-                    "close": float(item["c"]),
-                    "volume": float(item.get("v", 0) or 0),
-                })
-            except (KeyError, TypeError, ValueError, OverflowError):
+                payload, _ = self._http_json(
+                    "GET",
+                    path,
+                    query=query,
+                    headers={
+                        "CST": session.cst,
+                        "X-SECURITY-TOKEN": session.security_token,
+                    },
+                )
+            except _CapitalHttpError as exc:
+                if attempt == 0 and self._is_session_error(exc):
+                    self._invalidate_session(session)
+                    continue
+                self._raise_provider_error(exc)
+            self._touch_session(session)
+            return payload
+        raise CapitalError("Capital.com session could not be refreshed.")
+
+    @staticmethod
+    def _normalized(value: object) -> str:
+        return "".join(character for character in str(value or "").upper() if character.isalnum())
+
+    @staticmethod
+    def _market_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        markets = payload.get("markets")
+        return [item for item in markets or [] if isinstance(item, dict)]
+
+    def _candidate_epics(self, instrument: Instrument) -> tuple[str, ...]:
+        if instrument.market == Market.METALS:
+            return self.METAL_EPICS.get(instrument.id, (instrument.symbol,))
+        return (instrument.symbol,)
+
+    def _market_matches_type(self, item: dict[str, Any], instrument: Instrument) -> bool:
+        actual = str(item.get("instrumentType") or "").upper()
+        expected = "CURRENCIES" if instrument.market == Market.FOREX else "COMMODITIES"
+        return not actual or actual == expected
+
+    def _choose_market(
+        self,
+        markets: list[dict[str, Any]],
+        instrument: Instrument,
+        candidates: tuple[str, ...],
+        *,
+        exact_only: bool,
+    ) -> dict[str, Any] | None:
+        expected = {candidate.upper() for candidate in candidates}
+        target = self._normalized(instrument.symbol)
+        metal_term = self._normalized(self.METAL_SEARCH_TERMS.get(instrument.id, ""))
+        ranked: list[tuple[int, str, dict[str, Any]]] = []
+
+        for item in markets:
+            if not self._market_matches_type(item, instrument):
+                continue
+            epic = str(item.get("epic") or "").strip()
+            epic_upper = epic.upper()
+            if not epic:
+                continue
+            if exact_only and epic_upper not in expected:
+                continue
+            text = self._normalized(
+                " ".join(
+                    str(item.get(field) or "")
+                    for field in ("epic", "symbol", "instrumentName")
+                )
+            )
+            score = 100 if epic_upper in expected else 0
+            if target and target in text:
+                score += 50
+            if metal_term and metal_term in text:
+                score += 30
+            if str(item.get("marketStatus") or "").upper() == "TRADEABLE":
+                score += 5
+            if score > 0:
+                ranked.append((score, epic_upper, item))
+
+        if not ranked:
+            return None
+        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        return ranked[0][2]
+
+    def _resolve_direct_epic(self, instrument: Instrument) -> str:
+        with self._epic_lock:
+            cached = self._epic_cache.get(instrument.id)
+        if cached:
+            return cached
+
+        candidates = self._candidate_epics(instrument)
+        payload = self._request_json(
+            "/api/v1/markets",
+            {"epics": ",".join(candidates)},
+        )
+        selected = self._choose_market(
+            self._market_items(payload), instrument, candidates, exact_only=True
+        )
+
+        search_terms: tuple[str, ...] = ()
+        if instrument.market == Market.FOREX:
+            search_terms = (instrument.symbol, instrument.label)
+        elif instrument.id in self.METAL_SEARCH_TERMS:
+            search_terms = (self.METAL_SEARCH_TERMS[instrument.id],)
+        for search_term in search_terms:
+            if selected is not None:
+                break
+            payload = self._request_json(
+                "/api/v1/markets",
+                {"searchTerm": search_term},
+            )
+            selected = self._choose_market(
+                self._market_items(payload), instrument, candidates, exact_only=False
+            )
+
+        epic = str((selected or {}).get("epic") or "").strip()
+        if not epic:
+            raise CapitalInstrumentUnavailable(
+                f"{instrument.label} is unavailable on Capital.com."
+            )
+        with self._epic_lock:
+            self._epic_cache[instrument.id] = epic
+        return epic
+
+    @staticmethod
+    def _midpoint(value: object) -> float:
+        if not isinstance(value, dict):
+            raise CapitalError("Capital.com returned an unusable candle price.")
+        try:
+            bid_raw = value.get("bid")
+            ask_raw = value.get("ask")
+            if bid_raw is not None and ask_raw is not None:
+                result = (float(bid_raw) + float(ask_raw)) / 2.0
+            elif bid_raw is not None:
+                result = float(bid_raw)
+            elif ask_raw is not None:
+                result = float(ask_raw)
+            else:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise CapitalError("Capital.com returned an unusable candle price.") from exc
+        if not math.isfinite(result) or result <= 0:
+            raise CapitalError("Capital.com returned a non-positive candle price.")
+        return result
+
+    @staticmethod
+    def _market_midpoint(item: dict[str, Any]) -> float:
+        try:
+            bid_raw = item.get("bid")
+            offer_raw = item.get("offer")
+            if bid_raw is not None and offer_raw is not None:
+                result = (float(bid_raw) + float(offer_raw)) / 2.0
+            elif bid_raw is not None:
+                result = float(bid_raw)
+            elif offer_raw is not None:
+                result = float(offer_raw)
+            else:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise CapitalError("Capital.com returned an unusable live price.") from exc
+        if not math.isfinite(result) or result <= 0:
+            raise CapitalError("Capital.com returned a non-positive live price.")
+        return result
+
+    def _direct_price(self, instrument: Instrument) -> tuple[float, str]:
+        epic = self._resolve_direct_epic(instrument)
+        payload = self._request_json("/api/v1/markets", {"epics": epic})
+        selected = self._choose_market(
+            self._market_items(payload), instrument, (epic,), exact_only=True
+        )
+        if selected is None:
+            with self._epic_lock:
+                self._epic_cache.pop(instrument.id, None)
+            raise CapitalInstrumentUnavailable(
+                f"Capital.com returned no live data for {instrument.label}."
+            )
+        return self._market_midpoint(selected), epic
+
+    def _history_epic(self, epic: str, label: str, count: int) -> pd.DataFrame:
+        payload = self._request_json(
+            f"/api/v1/prices/{urllib.parse.quote(epic, safe='')}",
+            {
+                "resolution": "MINUTE_15",
+                "max": min(max(count + 2, 222), 1000),
+            },
+        )
+        prices = payload.get("prices")
+        rows: list[dict[str, object]] = []
+        for item in prices or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                rows.append(
+                    {
+                        "time": pd.to_datetime(
+                            item.get("snapshotTimeUTC") or item["snapshotTime"],
+                            utc=True,
+                        ),
+                        "open": self._midpoint(item.get("openPrice")),
+                        "high": self._midpoint(item.get("highPrice")),
+                        "low": self._midpoint(item.get("lowPrice")),
+                        "close": self._midpoint(item.get("closePrice")),
+                        "volume": float(item.get("lastTradedVolume", 0) or 0),
+                    }
+                )
+            except (KeyError, TypeError, ValueError, OverflowError, CapitalError):
                 continue
         if not rows:
-            raise FcsInstrumentUnavailable(f"FCS API returned no M15 candles for {symbol}.")
-        data = pd.DataFrame(rows).sort_values("time").drop_duplicates("time").reset_index(drop=True)
+            raise CapitalInstrumentUnavailable(
+                f"Capital.com returned no M15 candles for {label}."
+            )
 
-        # Do not analyze a still-forming M15 candle.
+        data = pd.DataFrame(rows).sort_values("time").drop_duplicates("time")
+        data = data.reset_index(drop=True)
         if len(data) > 0:
             last_start = data.iloc[-1]["time"]
             now = pd.Timestamp.now(tz="UTC")
@@ -726,44 +1026,19 @@ class FcsClient:
                 data = data.iloc[:-1]
         return data.tail(count).reset_index(drop=True)
 
-    def _metal_aliases(self, instrument: Instrument) -> tuple[str, ...]:
-        return self.METAL_ALIASES.get(instrument.id, (instrument.symbol,))
-
-    def _direct_price(self, instrument: Instrument) -> float:
-        if instrument.market == Market.FOREX:
-            return self._latest_direct(instrument.symbol, commodity=False)
-        last_error: Exception | None = None
-        for symbol in self._metal_aliases(instrument):
-            try:
-                return self._latest_direct(symbol, commodity=True)
-            except FcsInstrumentUnavailable as exc:
-                last_error = exc
-        if last_error:
-            raise FcsInstrumentUnavailable(str(last_error))
-        raise FcsInstrumentUnavailable(f"{instrument.label} is unavailable on FCS API.")
-
     def _direct_bars(self, instrument: Instrument, count: int) -> pd.DataFrame:
-        if instrument.market == Market.FOREX:
-            return self._history_direct(instrument.symbol, count, commodity=False)
-        last_error: Exception | None = None
-        for symbol in self._metal_aliases(instrument):
-            try:
-                return self._history_direct(symbol, count, commodity=True)
-            except FcsInstrumentUnavailable as exc:
-                last_error = exc
-        if last_error:
-            raise FcsInstrumentUnavailable(str(last_error))
-        raise FcsInstrumentUnavailable(f"{instrument.label} is unavailable on FCS API.")
+        epic = self._resolve_direct_epic(instrument)
+        return self._history_epic(epic, instrument.label, count)
 
     @staticmethod
     def _combine_price(metal_usd: float, fx: float, operation: str) -> float:
         if metal_usd <= 0 or fx <= 0:
-            raise FcsError("Cannot derive metal cross from non-positive prices.")
+            raise CapitalError("Cannot derive metal cross from non-positive prices.")
         if operation == "divide":
             return metal_usd / fx
         if operation == "multiply":
             return metal_usd * fx
-        raise FcsError("Unknown derived metal operation.")
+        raise CapitalError("Unknown derived metal operation.")
 
     @staticmethod
     def _combine_bars(left: pd.DataFrame, right: pd.DataFrame, operation: str) -> pd.DataFrame:
@@ -771,7 +1046,7 @@ class FcsClient:
         b = right.rename(columns={c: f"{c}_b" for c in ("open", "high", "low", "close", "volume")})
         merged = a.merge(b, on="time", how="inner")
         if merged.empty:
-            raise FcsError("Unable to align M15 candles for a derived metal cross.")
+            raise CapitalError("Unable to align M15 candles for a derived metal cross.")
         out = pd.DataFrame({"time": merged["time"]})
         if operation == "divide":
             out["open"] = merged["open_a"] / merged["open_b"]
@@ -784,35 +1059,48 @@ class FcsClient:
             out["high"] = merged["high_a"] * merged["high_b"]
             out["low"] = merged["low_a"] * merged["low_b"]
         else:
-            raise FcsError("Unknown derived metal operation.")
+            raise CapitalError("Unknown derived metal operation.")
         out["volume"] = merged["volume_a"].fillna(0)
         return out.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
-    def _derived_components(self, instrument: Instrument) -> tuple[Instrument, str, str] | None:
+    @staticmethod
+    def _forex_instrument(symbol: str) -> Instrument:
+        instrument = next(
+            (item for item in INSTRUMENTS[Market.FOREX] if item.symbol == symbol),
+            None,
+        )
+        if instrument is None:
+            raise CapitalError(f"Internal Forex mapping is missing: {symbol}")
+        return instrument
+
+    def _derived_components(
+        self, instrument: Instrument
+    ) -> tuple[Instrument, Instrument, str] | None:
         config = self.DERIVED_METALS.get(instrument.id)
         if not config:
             return None
         base_id, fx_symbol, operation = config
         base = get_instrument(Market.METALS, base_id)
         if base is None:
-            raise FcsError(f"Internal metal mapping is missing: {base_id}")
-        return base, fx_symbol, operation
+            raise CapitalError(f"Internal metal mapping is missing: {base_id}")
+        return base, self._forex_instrument(fx_symbol), operation
 
     def get_price(self, instrument: Instrument) -> LivePrice:
+        provider_symbol = instrument.symbol
         try:
-            price = self._direct_price(instrument)
-            source = "FCS API"
-        except FcsInstrumentUnavailable:
+            price, provider_symbol = self._direct_price(instrument)
+            source = self.provider_label
+        except CapitalInstrumentUnavailable:
             derived = self._derived_components(instrument)
             if derived is None:
                 raise
-            base, fx_symbol, operation = derived
-            metal_price = self._direct_price(base)
-            fx_price = self._latest_direct(fx_symbol, commodity=False)
+            base, fx_instrument, operation = derived
+            metal_price, _ = self._direct_price(base)
+            fx_price, _ = self._direct_price(fx_instrument)
             price = self._combine_price(metal_price, fx_price, operation)
-            source = "FCS API (derived cross)"
+            source = f"{self.provider_label} (derived cross)"
         return LivePrice(
-            symbol=instrument.symbol,
+            symbol=provider_symbol,
             price=price,
             digits=instrument.digits,
             fetched_at=datetime.now(timezone.utc),
@@ -822,30 +1110,52 @@ class FcsClient:
     def get_closed_bars(self, instrument: Instrument, count: int) -> pd.DataFrame:
         try:
             data = self._direct_bars(instrument, count)
-        except FcsInstrumentUnavailable:
+        except CapitalInstrumentUnavailable:
             derived = self._derived_components(instrument)
             if derived is None:
                 raise
-            base, fx_symbol, operation = derived
+            base, fx_instrument, operation = derived
             metal = self._direct_bars(base, count + 10)
-            fx = self._history_direct(fx_symbol, count + 10, commodity=False)
+            fx = self._direct_bars(fx_instrument, count + 10)
             data = self._combine_bars(metal, fx, operation).tail(count).reset_index(drop=True)
         if len(data) < 220:
-            raise FcsError(
+            raise CapitalError(
                 f"Only {len(data)} closed M15 candles are available for {instrument.label}; at least 220 are required."
             )
         return data
 
-    def symbol_availability(self) -> dict[str, set[str]]:
-        result: dict[str, set[str]] = {"forex": set(), "commodity": set()}
-        for kind in ("forex", "commodity"):
-            payload = self._request_json("forex/list", {"type": kind, "per_page": 5000})
-            for item in self._response_items(payload):
-                ticker = str(item.get("ticker") or "")
-                profile = item.get("profile") if isinstance(item.get("profile"), dict) else {}
-                symbol = str(profile.get("symbol") or ticker.split(":")[-1] or "").upper()
-                if symbol:
-                    result[kind].add(symbol)
+    def instrument_availability(
+        self, instruments: list[Instrument]
+    ) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
+        for instrument in instruments:
+            epic: str | None = None
+            try:
+                epic = self._resolve_direct_epic(instrument)
+                mode = "direct"
+            except CapitalInstrumentUnavailable:
+                derived = self._derived_components(instrument)
+                if derived is None:
+                    mode = "unavailable"
+                else:
+                    base, fx_instrument, _ = derived
+                    try:
+                        self._resolve_direct_epic(base)
+                        self._resolve_direct_epic(fx_instrument)
+                        mode = "derived"
+                    except CapitalInstrumentUnavailable:
+                        mode = "unavailable"
+            result.append(
+                {
+                    "market": instrument.market.value,
+                    "id": instrument.id,
+                    "label": instrument.label,
+                    "symbol": instrument.symbol,
+                    "provider_symbol": epic,
+                    "available": mode != "unavailable",
+                    "mode": mode,
+                }
+            )
         return result
 
 
@@ -927,7 +1237,7 @@ class M15SignalStrategy:
 
         signal = Signal(
             instrument=instrument,
-            provider_symbol=instrument.symbol,
+            provider_symbol=live_price.symbol,
             direction=direction,
             current_price=current,
             digits=instrument.digits,
@@ -1410,15 +1720,17 @@ def seconds_until_next_m15_close(grace_seconds: int = 4) -> float:
 class MarketDataRouter:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.fcs = FcsClient(settings)
+        self.capital = CapitalClient(settings)
         self.twelve = TwelveDataClient(settings)
 
     def provider_name(self, instrument: Instrument) -> str:
-        return "FCS API" if instrument.market in {Market.FOREX, Market.METALS} else "Twelve Data"
+        if instrument.market in {Market.FOREX, Market.METALS}:
+            return self.capital.provider_label
+        return "Twelve Data"
 
     def _client(self, instrument: Instrument):
         if instrument.market in {Market.FOREX, Market.METALS}:
-            return self.fcs
+            return self.capital
         return self.twelve
 
     async def price(self, instrument: Instrument) -> LivePrice:
@@ -1447,7 +1759,7 @@ class SignalService:
     async def current_price_with_meta(self, instrument: Instrument) -> tuple[LivePrice, bool]:
         key = f"price:{self.market_data.provider_name(instrument)}:{instrument.symbol}"
         ttl = (
-            float(self.settings.fcs_price_cache_seconds)
+            float(self.settings.capital_price_cache_seconds)
             if instrument.market in {Market.FOREX, Market.METALS}
             else float(self.settings.price_cache_seconds)
         )
@@ -1690,7 +2002,7 @@ START_TEXT = """🤖 <b>Meet MENTAL-TRADER BOT — Your M15 Market Signal Engine
 Welcome! MENTAL-TRADER analyzes live market data and gives structured M15 trading signals you can use when trading manually in MT5 or another platform.
 
 <b>What you get:</b>
-⚡️ <b>Live market data:</b> Forex & Metals via FCS API; Crypto & Nasdaq via Twelve Data.
+⚡️ <b>Live market data:</b> Forex & Metals via Capital.com; Crypto & Nasdaq via Twelve Data.
 📈 <b>Technical analysis:</b> EMA, RSI, MACD, ATR and support/resistance.
 🎯 <b>Structured signals:</b> BUY / SELL / WAIT with Entry, Stop Loss and two Take Profit levels.
 🛡️ <b>Risk-aware logic:</b> Every directional signal includes a defined stop and Risk/Reward target.
@@ -4288,5 +4600,3 @@ async def admin_reject(
             )
         except Exception:
             logger.exception("Could not update admin rejection message for payment %s", payment_id)
-
-
