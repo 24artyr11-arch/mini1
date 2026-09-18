@@ -971,17 +971,23 @@ class CapitalClient:
 
     def _direct_price(self, instrument: Instrument) -> tuple[float, str]:
         epic = self._resolve_direct_epic(instrument)
-        payload = self._request_json("/api/v1/markets", {"epics": epic})
-        selected = self._choose_market(
-            self._market_items(payload), instrument, (epic,), exact_only=True
-        )
-        if selected is None:
+        try:
+            payload = self._request_json(
+                f"/api/v1/markets/{urllib.parse.quote(epic, safe='')}"
+            )
+        except CapitalInstrumentUnavailable:
+            with self._epic_lock:
+                self._epic_cache.pop(instrument.id, None)
+            raise
+
+        snapshot = payload.get("snapshot")
+        if not isinstance(snapshot, dict):
             with self._epic_lock:
                 self._epic_cache.pop(instrument.id, None)
             raise CapitalInstrumentUnavailable(
                 f"Capital.com returned no live data for {instrument.label}."
             )
-        return self._market_midpoint(selected), epic
+        return self._market_midpoint(snapshot), epic
 
     def _history_epic(self, epic: str, label: str, count: int) -> pd.DataFrame:
         payload = self._request_json(
