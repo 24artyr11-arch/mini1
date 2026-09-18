@@ -28,6 +28,7 @@ from .core import (
     AccessStore,
     CapitalInstrumentUnavailable,
     Market,
+    MarketClosedError,
     MarketDataError,
     MarketDataRateLimitError,
     Settings,
@@ -196,7 +197,7 @@ def create_api(
 ) -> FastAPI:
     app = FastAPI(
         title="MENTAL TRADER Backend",
-        version="3.5.2",
+        version="3.5.3",
         description="Mini App-first MENTAL TRADER backend. Customer actions live in the Mini App; Telegram chat is reserved for admin operations and notifications.",
         lifespan=lifespan,
     )
@@ -457,6 +458,8 @@ def create_api(
             raise HTTPException(status_code=404, detail="Unknown instrument.")
         try:
             live, cached = await signal_service.current_price_with_meta(instrument)
+        except MarketClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except CapitalInstrumentUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except MarketDataRateLimitError as exc:
@@ -503,6 +506,8 @@ def create_api(
             raise HTTPException(status_code=404, detail="Unknown instrument.")
         try:
             result, cached = await signal_service.calculate_with_meta(instrument)
+        except MarketClosedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except CapitalInstrumentUnavailable as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except MarketDataRateLimitError as exc:
