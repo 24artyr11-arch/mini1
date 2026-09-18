@@ -1,4 +1,4 @@
-# MENTAL TRADER backend v3.5.2
+# MENTAL TRADER backend v3.5.3
 
 FastAPI + aiogram backend for the MENTAL TRADER Telegram Mini App.
 
@@ -86,7 +86,7 @@ Test after deployment:
 https://YOUR-BACKEND-DOMAIN/health
 ```
 
-Expected `version` is `3.5.2`.
+Expected `version` is `3.5.3`.
 
 ## Market data providers
 
@@ -94,6 +94,11 @@ Forex and Metals use Capital.com. Crypto and Nasdaq continue to use Twelve Data.
 The Capital.com adapter creates an API session, resolves provider epics, reads
 live bid/offer quotes and downloads `MINUTE_15` history. Bid/ask candle values
 are converted to midpoint OHLC before the existing signal strategy runs.
+
+Before returning a price or signal, the backend checks the provider's market
+status. Capital.com's `marketStatus` protects Forex and Metals, and Twelve
+Data's `is_market_open` protects Nasdaq. A closed market returns HTTP 409, and
+the Mini App shows a dedicated **Market is closed** screen instead of a signal.
 
 The adapter contains no position or order methods. The API key is used only for
 session authentication and read-only market-data requests. Capital.com does not
