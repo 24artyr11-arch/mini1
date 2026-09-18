@@ -196,7 +196,7 @@ def create_api(
 ) -> FastAPI:
     app = FastAPI(
         title="MENTAL TRADER Backend",
-        version="3.5.1",
+        version="3.5.2",
         description="Mini App-first MENTAL TRADER backend. Customer actions live in the Mini App; Telegram chat is reserved for admin operations and notifications.",
         lifespan=lifespan,
     )
@@ -366,7 +366,7 @@ def create_api(
         return {
             "ok": True,
             "service": "mental-trader-backend",
-            "version": "3.5.1",
+            "version": "3.5.2",
             "timeframe": settings.timeframe_label,
             "miniapp_configured": bool(settings.miniapp_url),
             "cors_origin": origin or None,
