@@ -1,4 +1,4 @@
-# MENTAL TRADER backend v3.5.1
+# MENTAL TRADER backend v3.5.2
 
 FastAPI + aiogram backend for the MENTAL TRADER Telegram Mini App.
 
@@ -86,7 +86,7 @@ Test after deployment:
 https://YOUR-BACKEND-DOMAIN/health
 ```
 
-Expected `version` is `3.5.1`.
+Expected `version` is `3.5.2`.
 
 ## Market data providers
 
